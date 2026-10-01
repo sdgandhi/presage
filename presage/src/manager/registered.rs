@@ -57,6 +57,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, error, info, trace, warn};
 use url::Url;
 
+use crate::history::{self, HistoryTransferResult, LinkedDeviceHistory};
 use crate::model::contacts::Contact;
 use crate::serde::serde_profile_key;
 use crate::store::{ContentsStore, Sticker, StickerPack, StickerPackManifest, Store, Thread};
@@ -169,6 +170,22 @@ impl RegistrationData {
 }
 
 impl<S: Store> Manager<S, Registered> {
+    /// Downloads and validates the link-and-sync archive selected by the
+    /// primary device. The credentials are consumed so they cannot be reused.
+    pub async fn download_linked_device_history(
+        &self,
+        credentials: LinkedDeviceHistory,
+        timeout: std::time::Duration,
+    ) -> Result<HistoryTransferResult, Error<S::Error>> {
+        history::download(
+            self.state.identified_push_service(),
+            self.registration_data().service_ids.aci(),
+            credentials,
+            timeout,
+        )
+        .await
+    }
+
     /// Loads a previously registered account from the implemented [Store].
     ///
     /// Returns a instance of [Manager] you can use to send & receive messages.

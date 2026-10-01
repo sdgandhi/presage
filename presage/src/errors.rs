@@ -45,6 +45,8 @@ pub enum Error<S: std::error::Error> {
     NoProvisioningMessageReceived,
     #[error("qr code error")]
     LinkingError,
+    #[error("linked-device history transfer failed: {0}")]
+    HistoryTransfer(String),
     #[error("please relink your client")]
     RelinkNecessary,
     #[error("missing key {0} in config DB")]

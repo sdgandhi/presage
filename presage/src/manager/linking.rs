@@ -15,6 +15,7 @@ use rand::{
 use tracing::info;
 use url::Url;
 
+use crate::history::LinkedDeviceHistory;
 use crate::manager::registered::RegistrationData;
 use crate::store::Store;
 use crate::{Error, Manager};
@@ -60,11 +61,29 @@ impl<S: Store> Manager<S, Linking> {
     /// }
     /// ```
     pub async fn link_secondary_device(
-        mut store: S,
+        store: S,
         signal_servers: SignalServers,
         device_name: String,
         provisioning_link_channel: oneshot::Sender<Url>,
     ) -> Result<Manager<S, Registered>, Error<S::Error>> {
+        Self::link_secondary_device_with_history(
+            store,
+            signal_servers,
+            device_name,
+            provisioning_link_channel,
+        )
+        .await
+        .map(|(manager, _history)| manager)
+    }
+
+    /// Links this client and preserves Signal's optional one-time history
+    /// transfer credentials for immediate download by the caller.
+    pub async fn link_secondary_device_with_history(
+        mut store: S,
+        signal_servers: SignalServers,
+        device_name: String,
+        provisioning_link_channel: oneshot::Sender<Url>,
+    ) -> Result<(Manager<S, Registered>, Option<LinkedDeviceHistory>), Error<S::Error>> {
         // clear the database: the moment we start the process, old API credentials are invalidated
         // and you won't be able to use this client anyways
         store.clear_registration().await?;
@@ -126,7 +145,7 @@ impl<S: Store> Manager<S, Linking> {
                 pni_public_key,
                 profile_key,
                 account_entropy_pool,
-                ephemeral_backup_key: _,
+                ephemeral_backup_key,
             }) => {
                 let registration_data = RegistrationData {
                     signal_servers,
@@ -177,7 +196,7 @@ impl<S: Store> Manager<S, Linking> {
                     state: Registered::with_data(registration_data),
                 };
 
-                Ok(manager)
+                Ok((manager, ephemeral_backup_key.map(LinkedDeviceHistory::new)))
             }
             Err(e) => {
                 store.clear_registration().await?;
