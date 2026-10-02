@@ -66,11 +66,12 @@ impl<S: Store> Manager<S, Linking> {
         device_name: String,
         provisioning_link_channel: oneshot::Sender<Url>,
     ) -> Result<Manager<S, Registered>, Error<S::Error>> {
-        Self::link_secondary_device_with_history(
+        Self::link_secondary_device_inner(
             store,
             signal_servers,
             device_name,
             provisioning_link_channel,
+            false,
         )
         .await
         .map(|(manager, _history)| manager)
@@ -79,10 +80,27 @@ impl<S: Store> Manager<S, Linking> {
     /// Links this client and preserves Signal's optional one-time history
     /// transfer credentials for immediate download by the caller.
     pub async fn link_secondary_device_with_history(
+        store: S,
+        signal_servers: SignalServers,
+        device_name: String,
+        provisioning_link_channel: oneshot::Sender<Url>,
+    ) -> Result<(Manager<S, Registered>, Option<LinkedDeviceHistory>), Error<S::Error>> {
+        Self::link_secondary_device_inner(
+            store,
+            signal_servers,
+            device_name,
+            provisioning_link_channel,
+            true,
+        )
+        .await
+    }
+
+    async fn link_secondary_device_inner(
         mut store: S,
         signal_servers: SignalServers,
         device_name: String,
         provisioning_link_channel: oneshot::Sender<Url>,
+        request_history: bool,
     ) -> Result<(Manager<S, Registered>, Option<LinkedDeviceHistory>), Error<S::Error>> {
         // clear the database: the moment we start the process, old API credentials are invalidated
         // and you won't be able to use this client anyways
@@ -111,7 +129,10 @@ impl<S: Store> Manager<S, Linking> {
                 tx,
             ),
             async move {
-                if let Some(SecondaryDeviceProvisioning::Url(url)) = rx.next().await {
+                if let Some(SecondaryDeviceProvisioning::Url(mut url)) = rx.next().await {
+                    if request_history {
+                        add_link_and_sync_capability(&mut url);
+                    }
                     info!("generating qrcode from provisioning link: {}", &url);
                     if provisioning_link_channel.send(url).is_err() {
                         return Err(Error::LinkingError);
@@ -203,5 +224,57 @@ impl<S: Store> Manager<S, Linking> {
                 Err(e)
             }
         }
+    }
+}
+
+fn add_link_and_sync_capability(url: &mut Url) {
+    let mut pairs: Vec<(String, String)> = url
+        .query_pairs()
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    match pairs
+        .iter_mut()
+        .find(|(key, _value)| key == "capabilities")
+    {
+        Some((_key, value)) if !value.split(',').any(|item| item == "backup5") => {
+            if !value.is_empty() {
+                value.push(',');
+            }
+            value.push_str("backup5");
+        }
+        Some(_) => return,
+        None => pairs.push(("capabilities".into(), "backup5".into())),
+    }
+    url.query_pairs_mut().clear().extend_pairs(pairs);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::add_link_and_sync_capability;
+    use url::Url;
+
+    #[test]
+    fn link_and_sync_capability_preserves_existing_query() {
+        let mut url = Url::parse(
+            "sgnl://linkdevice?uuid=device-id&pub_key=public-key&capabilities=nopni",
+        )
+        .expect("provisioning URL");
+
+        add_link_and_sync_capability(&mut url);
+
+        assert_eq!(
+            url.query_pairs()
+                .find(|(key, _)| key == "uuid")
+                .unwrap()
+                .1,
+            "device-id"
+        );
+        assert_eq!(
+            url.query_pairs()
+                .find(|(key, _)| key == "capabilities")
+                .unwrap()
+                .1,
+            "nopni,backup5"
+        );
     }
 }
