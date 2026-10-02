@@ -299,9 +299,34 @@ impl ContentsStore for SqliteStore {
     }
 
     async fn save_contact(&mut self, contact: &Contact) -> Result<(), Self::ContentsStoreError> {
-        let profile_key: &[u8] = contact.profile_key.as_ref();
+        let existing: Option<(Option<String>, String, Vec<u8>)> = sqlx::query_as(
+            "SELECT phone_number, name, profile_key FROM contacts WHERE uuid = ?",
+        )
+        .bind(contact.uuid)
+        .fetch_optional(&self.db)
+        .await?;
+        let phone_number = contact
+            .phone_number
+            .as_ref()
+            .map(|p| p.to_string())
+            .or_else(|| existing.as_ref().and_then(|row| row.0.clone()));
+        let name = if contact.name.trim().is_empty() {
+            existing
+                .as_ref()
+                .map(|row| row.1.as_str())
+                .unwrap_or(contact.name.as_str())
+        } else {
+            contact.name.as_str()
+        };
+        let profile_key = if contact.profile_key.is_empty() {
+            existing
+                .as_ref()
+                .map(|row| row.2.as_slice())
+                .unwrap_or(contact.profile_key.as_slice())
+        } else {
+            contact.profile_key.as_slice()
+        };
         let avatar_bytes = contact.avatar.as_ref().map(|a| a.reader.to_vec());
-        let phone_number = contact.phone_number.as_ref().map(|p| p.to_string());
 
         let mut tx = self.db.begin().await?;
 
@@ -310,7 +335,7 @@ impl ContentsStore for SqliteStore {
             VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
             contact.uuid,
             phone_number,
-            contact.name,
+            name,
             profile_key,
             contact.expire_timer,
             contact.expire_timer_version,
@@ -764,6 +789,46 @@ mod test {
         assert!(store.upsert_profile_key(&uuid, key).await?);
         assert!(store.upsert_profile_key(&uuid, key).await?);
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn partial_contact_sync_preserves_archive_identity(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut store = SqliteStore::open(":memory:", OnNewIdentity::Trust).await?;
+        let uuid = Uuid::from_bytes([1; 16]);
+        let archive_contact = Contact {
+            uuid,
+            phone_number: None,
+            name: "Archive Name".into(),
+            verified: Default::default(),
+            profile_key: vec![7; 32],
+            expire_timer: 0,
+            expire_timer_version: 2,
+            inbox_position: 0,
+            avatar: None,
+        };
+        store.save_contact(&archive_contact).await?;
+
+        let partial_contact = Contact {
+            uuid,
+            phone_number: None,
+            name: String::new(),
+            verified: Default::default(),
+            profile_key: Vec::new(),
+            expire_timer: 0,
+            expire_timer_version: 2,
+            inbox_position: 0,
+            avatar: None,
+        };
+        store.save_contact(&partial_contact).await?;
+
+        let saved = store
+            .contact_by_id(&ServiceId::Aci(uuid.into()))
+            .await?
+            .expect("saved contact");
+        assert_eq!(saved.name, "Archive Name");
+        assert_eq!(saved.profile_key, vec![7; 32]);
         Ok(())
     }
 }
